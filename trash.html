@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Nearby Hospitals (OSM + Overpass + Leaflet)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <style>
+      body,
+      html {
+        height: 100%;
+        margin: 0;
+      }
+      #map {
+        height: calc(100vh - 64px);
+      }
+      #topbar {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px;
+        background: #f7f7f7;
+      }
+      input {
+        padding: 6px;
+        width: 260px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="topbar">
+      <button id="btnLocation">Use my location</button>
+      <input id="cityInput" placeholder="Or type city (e.g. Mumbai, India)" />
+      <button id="btnCity">Search city</button>
+      <label
+        >Radius (m): <input id="radius" value="3000" style="width: 80px"
+      /></label>
+      <span id="status"></span>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      const statusEl = document.getElementById("status");
+      const map = L.map("map").setView([20.5937, 78.9629], 5); // India default
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "© OpenStreetMap contributors",
+      }).addTo(map);
+
+      const markers = L.layerGroup().addTo(map);
+
+      async function queryOverpass(lat, lon, radiusMeters = 3000) {
+        // Overpass query: nodes/ways/rels with amenity=hospital within radius
+        const q = `
+        [out:json][timeout:25];
+        (
+          node["amenity"="hospital"](around:${radiusMeters},${lat},${lon});
+          way["amenity"="hospital"](around:${radiusMeters},${lat},${lon});
+          relation["amenity"="hospital"](around:${radiusMeters},${lat},${lon});
+        );
+        out center tags;
+      `;
+        const url = "https://overpass-api.de/api/interpreter";
+        statusEl.textContent = "Loading nearby hospitals...";
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ data: q }),
+          });
+          if (!res.ok) throw new Error("Overpass error: " + res.status);
+          const json = await res.json();
+          return json.elements || [];
+        } catch (err) {
+          console.error(err);
+          statusEl.textContent = "Error fetching Overpass: " + err.message;
+          return [];
+        }
+      }
+
+      function showHospitals(elements) {
+        markers.clearLayers();
+        if (!elements.length) {
+          statusEl.textContent = "No hospitals found in that radius.";
+          return;
+        }
+        elements.forEach((el) => {
+          const lat = el.lat ?? el.center?.lat;
+          const lon = el.lon ?? el.center?.lon;
+          if (!lat || !lon) return;
+          const name = el.tags?.name || "Unnamed hospital";
+          const addr = [
+            el.tags?.["addr:street"],
+            el.tags?.["addr:city"],
+            el.tags?.["addr:postcode"],
+          ]
+            .filter(Boolean)
+            .join(", ");
+          const popupHtml = `<b>${name}</b><br/>${
+            addr || ""
+          }<br/><small>OSM id: ${el.id}</small>`;
+          L.marker([lat, lon]).addTo(markers).bindPopup(popupHtml);
+        });
+        statusEl.textContent = `Found ${elements.length} results.`;
+        if (elements.length) {
+          const first = elements[0];
+          const lat = first.lat ?? first.center?.lat;
+          const lon = first.lon ?? first.center?.lon;
+          map.setView([lat, lon], 13);
+        }
+      }
+
+      document.getElementById("btnLocation").onclick = async () => {
+        if (!navigator.geolocation) {
+          statusEl.textContent = "Geolocation not supported";
+          return;
+        }
+        statusEl.textContent = "Requesting location…";
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            const lat = pos.coords.latitude,
+              lon = pos.coords.longitude;
+            const rad = Number(document.getElementById("radius").value) || 3000;
+            const elems = await queryOverpass(lat, lon, rad);
+            showHospitals(elems);
+          },
+          (err) => {
+            statusEl.textContent = "Location denied or failed: " + err.message;
+          },
+          { enableHighAccuracy: true }
+        );
+      };
+
+      // Simple city geocode (Nominatim)
+      async function geocodeCity(q) {
+        const url =
+          "https://nominatim.openstreetmap.org/search?" +
+          new URLSearchParams({
+            q,
+            format: "json",
+            limit: 1,
+            addressdetails: 1,
+          });
+        statusEl.textContent = "Geocoding city…";
+        const res = await fetch(url, { headers: { "Accept-Language": "en" } });
+        const data = await res.json();
+        if (!data.length) {
+          statusEl.textContent = "City not found";
+          return null;
+        }
+        const place = data[0];
+        return {
+          lat: Number(place.lat),
+          lon: Number(place.lon),
+          display_name: place.display_name,
+        };
+      }
+
+      document.getElementById("btnCity").onclick = async () => {
+        const q = document.getElementById("cityInput").value.trim();
+        if (!q) {
+          statusEl.textContent = "Type a city name";
+          return;
+        }
+        const place = await geocodeCity(q);
+        if (!place) return;
+        const rad = Number(document.getElementById("radius").value) || 3000;
+        const elems = await queryOverpass(place.lat, place.lon, rad);
+        showHospitals(elems);
+      };
+    </script>
+  </body>
+</html>
